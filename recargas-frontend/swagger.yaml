@@ -1,0 +1,776 @@
+openapi: 3.0.3
+info:
+  title: RecargaPlus API
+  version: 1.0.0
+  description: |
+    API para usuarios, catálogos de compañías, paquetes de recarga y pagos
+    de prueba mediante Stripe Checkout. PostgreSQL conserva el historial.
+
+    **Entorno de demostración:** un pago confirmado no significa que se haya
+    aplicado saldo real a una línea telefónica.
+
+    **Autenticación:** inicia sesión en `POST /api/auth/login`, copia `token`
+    y usa el botón **Authorize** para habilitar rutas protegidas.
+
+    **Webhook:** `POST /api/payments/webhook` solo acepta notificaciones
+    firmadas de Stripe. No lo invoques manualmente desde Swagger UI.
+servers:
+  - url: http://localhost:3001
+    description: Backend local Express
+
+tags:
+  - name: Health
+    description: Estado de la API
+  - name: Authentication
+    description: Registro, inicio de sesión y usuario actual
+  - name: Catalog
+    description: Compañías, categorías y paquetes de recarga
+  - name: Payments
+    description: Checkout y webhook de Stripe
+  - name: Recharges
+    description: Historial de operaciones del usuario autenticado
+
+paths:
+  /api/health:
+    get:
+      tags: [Health]
+      summary: Verificar el estado de la API
+      operationId: getHealth
+      responses:
+        '200':
+          description: API disponible
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: ok
+                message: API de recargas funcionando
+
+  /api/auth/register:
+    post:
+      tags: [Authentication]
+      summary: Registrar usuario
+      operationId: registerUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Credentials'
+            example:
+              email: usuario@ejemplo.com
+              password: Prueba123!
+      responses:
+        '201':
+          description: Usuario creado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterResponse'
+              example:
+                message: Usuario registrado correctamente
+                user:
+                  id: 1
+                  email: usuario@ejemplo.com
+                  created_at: '2026-10-23T15:30:00.000Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: El correo ya existe
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: El correo ya está registrado
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/auth/login:
+    post:
+      tags: [Authentication]
+      summary: Iniciar sesión y obtener JWT
+      description: El JWT de esta versión expira en 2 horas.
+      operationId: loginUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Credentials'
+            example:
+              email: usuario@ejemplo.com
+              password: Prueba123!
+      responses:
+        '200':
+          description: Inicio de sesión exitoso
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+              example:
+                message: Inicio de sesión exitoso
+                token: eyJhbGciOiJIUzI1NiIs...TOKEN_DE_EJEMPLO
+                user:
+                  id: 1
+                  email: usuario@ejemplo.com
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/auth/me:
+    get:
+      tags: [Authentication]
+      summary: Consultar usuario autenticado
+      operationId: getCurrentUser
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Datos del usuario asociado al JWT
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CurrentUserResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/carriers:
+    get:
+      tags: [Catalog]
+      summary: Listar compañías activas
+      operationId: listCarriers
+      responses:
+        '200':
+          description: Compañías disponibles
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Carrier'
+              example:
+                - id: 1
+                  code: telcel
+                  name: Telcel
+                - id: 2
+                  code: movistar
+                  name: Movistar
+                - id: 3
+                  code: att
+                  name: AT&T
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/carriers/{code}/types:
+    get:
+      tags: [Catalog]
+      summary: Consultar categorías de una compañía
+      operationId: listRechargeTypes
+      parameters:
+        - name: code
+          in: path
+          required: true
+          description: Código de la compañía registrado en `carriers.code`.
+          schema:
+            type: string
+          example: telcel
+      responses:
+        '200':
+          description: Categorías de recarga (arreglo vacío si no existen)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RechargeType'
+              example:
+                - id: 1
+                  code: saldo
+                  name: Recargas de saldo
+                - id: 2
+                  code: paquetes
+                  name: Paquetes
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/packages:
+    get:
+      tags: [Catalog]
+      summary: Consultar paquetes por compañía y categoría
+      operationId: listPackages
+      parameters:
+        - name: carrier
+          in: query
+          required: true
+          description: Código de la compañía.
+          schema:
+            type: string
+          example: telcel
+        - name: type
+          in: query
+          required: true
+          description: Código de categoría de recarga.
+          schema:
+            type: string
+          example: paquetes
+      responses:
+        '200':
+          description: Paquetes activos filtrados
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RechargePackage'
+              example:
+                - id: 1
+                  name: Paquete Demo 100
+                  price_cents: 10000
+                  validity_days: 15
+                  validity_hours: null
+                  benefits:
+                    - 2 GB de internet
+                    - Llamadas incluidas
+                  type: paquetes
+                  carrier: Telcel
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/payments/checkout:
+    post:
+      tags: [Payments]
+      summary: Crear una sesión de pago Stripe Checkout
+      description: |
+        Requiere un JWT válido. El backend recupera el precio en PostgreSQL,
+        crea la recarga `pending` y solicita a Stripe una URL de Checkout.
+        La respuesta NO confirma que el pago haya sido realizado.
+      operationId: createCheckoutSession
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCheckoutRequest'
+            example:
+              packageId: 1
+              phone: '3121234567'
+      responses:
+        '201':
+          description: Sesión creada, pago pendiente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckoutResponse'
+              example:
+                message: Sesión de pago creada
+                rechargeId: 550e8400-e29b-41d4-a716-446655440000
+                sessionId: cs_test_ejemplo
+                url: https://checkout.stripe.com/ejemplo
+                status: pending
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Paquete no encontrado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: Paquete no encontrado
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '502':
+          description: Error al preparar la sesión en Stripe
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckoutErrorResponse'
+
+  /api/payments/webhook:
+    post:
+      tags: [Payments]
+      summary: Recibir evento firmado de Stripe
+      description: |
+        **Uso exclusivo de Stripe.** Requiere el encabezado `Stripe-Signature`
+        y el cuerpo JSON original sin modificar. No se autoriza con JWT.
+        No se debe probar enviando un evento inventado desde Swagger UI.
+        Eventos previstos: `checkout.session.completed`,
+        `checkout.session.async_payment_succeeded`,
+        `checkout.session.async_payment_failed` y `checkout.session.expired`.
+      operationId: handleStripeWebhook
+      parameters:
+        - name: Stripe-Signature
+          in: header
+          required: true
+          description: Firma del evento enviada por Stripe.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        description: Evento JSON firmado, transmitido por Stripe.
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Evento recibido o ignorado correctamente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookResponse'
+        '400':
+          description: Firma o cuerpo inválido
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/recharges:
+    get:
+      tags: [Recharges]
+      summary: Listar historial propio de recargas
+      description: |
+        Se filtra por el usuario autenticado a partir del JWT. Esta versión
+        documenta la variante **paginada** (`page`, `limit`) propuesta para
+        `recharges.ts`; verifica que ya la hayas aplicado.
+      operationId: listMyRecharges
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          description: Página a consultar (empieza en 1).
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          example: 1
+        - name: limit
+          in: query
+          description: Registros por página.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 10
+          example: 10
+      responses:
+        '200':
+          description: Historial del usuario autenticado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedRecharges'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/recharges/{id}:
+    get:
+      tags: [Recharges]
+      summary: Obtener detalle de una recarga propia
+      operationId: getMyRecharge
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Identificador UUID de la recarga.
+          schema:
+            type: string
+            format: uuid
+          example: 550e8400-e29b-41d4-a716-446655440000
+      responses:
+        '200':
+          description: Detalles de una recarga del usuario
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RechargeDetailResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Recarga inexistente o no perteneciente al usuario
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: Recarga no encontrada
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Copia el valor de `token` devuelto por `POST /api/auth/login`.
+
+  responses:
+    BadRequest:
+      description: Parámetros o datos inválidos
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: Datos inválidos
+    Unauthorized:
+      description: Credenciales o token ausentes, incorrectos o expirados
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: Token inválido o expirado
+    TooManyRequests:
+      description: Se superó el límite de solicitudes
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: Demasiados intentos de inicio de sesión
+    InternalServerError:
+      description: Error del servidor
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: Error interno del servidor
+
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+        details:
+          type: array
+          description: Opcional; lista de errores de validación.
+          items:
+            type: object
+            additionalProperties: true
+
+    HealthResponse:
+      type: object
+      required: [status, message]
+      properties:
+        status:
+          type: string
+          example: ok
+        message:
+          type: string
+          example: API de recargas funcionando
+
+    Credentials:
+      type: object
+      required: [email, password]
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+          example: usuario@ejemplo.com
+        password:
+          type: string
+          format: password
+          minLength: 8
+          maxLength: 72
+          example: Prueba123!
+
+    User:
+      type: object
+      required: [id, email]
+      properties:
+        id:
+          type: integer
+          example: 1
+        email:
+          type: string
+          format: email
+          example: usuario@ejemplo.com
+
+    UserWithCreatedAt:
+      allOf:
+        - $ref: '#/components/schemas/User'
+        - type: object
+          required: [created_at]
+          properties:
+            created_at:
+              type: string
+              format: date-time
+              example: '2026-10-23T15:30:00.000Z'
+
+    RegisterResponse:
+      type: object
+      required: [message, user]
+      properties:
+        message:
+          type: string
+          example: Usuario registrado correctamente
+        user:
+          $ref: '#/components/schemas/UserWithCreatedAt'
+
+    LoginResponse:
+      type: object
+      required: [message, token, user]
+      properties:
+        message:
+          type: string
+          example: Inicio de sesión exitoso
+        token:
+          type: string
+          description: Token JWT con una duración de 2 horas.
+          example: eyJhbGciOiJIUzI1NiIs...TOKEN_DE_EJEMPLO
+        user:
+          $ref: '#/components/schemas/User'
+
+    CurrentUserResponse:
+      type: object
+      required: [user]
+      properties:
+        user:
+          $ref: '#/components/schemas/UserWithCreatedAt'
+
+    Carrier:
+      type: object
+      required: [id, code, name]
+      properties:
+        id:
+          type: integer
+          example: 1
+        code:
+          type: string
+          example: telcel
+        name:
+          type: string
+          example: Telcel
+
+    RechargeType:
+      type: object
+      required: [id, code, name]
+      properties:
+        id:
+          type: integer
+          example: 2
+        code:
+          type: string
+          example: paquetes
+        name:
+          type: string
+          example: Paquetes
+
+    RechargePackage:
+      type: object
+      required: [id, name, price_cents, validity_days, benefits, type, carrier]
+      properties:
+        id:
+          type: integer
+          example: 1
+        name:
+          type: string
+          example: Paquete Demo 100
+        price_cents:
+          type: integer
+          minimum: 1
+          description: Precio en centavos de MXN.
+          example: 10000
+        validity_days:
+          type: integer
+          nullable: true
+          minimum: 1
+          example: 15
+        validity_hours:
+          type: integer
+          nullable: true
+          minimum: 1
+          description: Disponible si se añadió esta columna al SELECT de paquetes.
+        benefits:
+          type: array
+          items:
+            type: string
+          example:
+            - 2 GB de internet
+            - Llamadas incluidas
+        type:
+          type: string
+          example: paquetes
+        carrier:
+          type: string
+          example: Telcel
+
+    CreateCheckoutRequest:
+      type: object
+      additionalProperties: false
+      required: [packageId, phone]
+      properties:
+        packageId:
+          type: integer
+          minimum: 1
+          description: ID de paquete activo, no un precio definido por el cliente.
+          example: 1
+        phone:
+          type: string
+          pattern: '^\d{10}$'
+          description: Número celular mexicano de 10 dígitos.
+          example: '3121234567'
+
+    CheckoutResponse:
+      type: object
+      required: [message, rechargeId, sessionId, url, status]
+      properties:
+        message:
+          type: string
+          example: Sesión de pago creada
+        rechargeId:
+          type: string
+          format: uuid
+        sessionId:
+          type: string
+          example: cs_test_ejemplo
+        url:
+          type: string
+          format: uri
+          description: URL de Stripe Checkout para continuar el pago.
+        status:
+          type: string
+          enum: [pending]
+
+    CheckoutErrorResponse:
+      allOf:
+        - $ref: '#/components/schemas/ErrorResponse'
+        - type: object
+          properties:
+            rechargeId:
+              type: string
+              format: uuid
+            requiresReview:
+              type: boolean
+              description: Indica si es necesaria conciliación de un resultado incierto.
+
+    WebhookResponse:
+      type: object
+      required: [received]
+      properties:
+        received:
+          type: boolean
+          example: true
+
+    RechargeStatus:
+      type: string
+      enum: [pending, paid, failed]
+
+    RechargeRecord:
+      type: object
+      required:
+        - id
+        - carrier
+        - phone
+        - amount_cents
+        - currency
+        - status
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: 550e8400-e29b-41d4-a716-446655440000
+        carrier:
+          type: string
+          example: Telcel
+        phone:
+          type: string
+          example: '3121234567'
+        amount_cents:
+          type: integer
+          example: 10000
+        currency:
+          type: string
+          example: mxn
+        status:
+          $ref: '#/components/schemas/RechargeStatus'
+        failure_reason:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        package_name:
+          type: string
+          nullable: true
+          example: Paquete Demo 100
+        benefits:
+          type: array
+          nullable: true
+          items:
+            type: string
+        recharge_type:
+          type: string
+          nullable: true
+          example: Paquetes
+
+    PaginatedRecharges:
+      type: object
+      required: [page, limit, total, totalPages, recharges]
+      properties:
+        page:
+          type: integer
+          example: 1
+        limit:
+          type: integer
+          example: 10
+        total:
+          type: integer
+          example: 23
+        totalPages:
+          type: integer
+          example: 3
+        recharges:
+          type: array
+          items:
+            $ref: '#/components/schemas/RechargeRecord'
+
+    RechargeDetailResponse:
+      type: object
+      required: [recharge]
+      properties:
+        recharge:
+          $ref: '#/components/schemas/RechargeRecord'
