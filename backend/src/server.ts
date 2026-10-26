@@ -25,7 +25,7 @@ app.post(
   stripeWebhookHandler
 );
 
-app.use(express.json());
+app.use(express.json({ limit: "16kb" }));
 app.use("/api/payments", paymentsRouter);
 app.use("/api/recharges", rechargesRouter);
 app.use("/api/auth", authRouter);
@@ -36,6 +36,16 @@ app.get("/api/health", (_req, res) => {
     status: "ok",
     message: "API de recargas funcionando"
   });
+});
+
+app.get("/api/health/ready", async (_req, res) => {
+  try {
+    await pool.query("SELECT 1");
+    res.status(200).json({ status: "ready" });
+  } catch (error) {
+    console.error("PostgreSQL readiness check failed:", error);
+    res.status(503).json({ status: "not_ready" });
+  }
 });
 
 
@@ -107,8 +117,20 @@ const errorHandler: ErrorRequestHandler =
   (error, _req, res, _next) => {
     console.error(error);
 
-    res.status(500).json({
-      error: "Error interno del servidor"
+    const status =
+      typeof error === "object" &&
+      error !== null &&
+      "status" in error &&
+      typeof error.status === "number" &&
+      error.status >= 400 &&
+      error.status < 500
+        ? error.status
+        : 500;
+
+    res.status(status).json({
+      error: status === 500
+        ? "Error interno del servidor"
+        : "Solicitud inválida"
     });
   };
 

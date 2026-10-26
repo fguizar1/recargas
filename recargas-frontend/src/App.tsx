@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { api, type Carrier, type Recharge, type RechargePackage, type RechargeType, type User } from "./api";
+import { ApiError, api, type Carrier, type Recharge, type RechargePackage, type RechargeType, type User } from "./api";
 import "./App.css";
-import { getCarriers } from "./api";
 
 type Page = "catalog" | "history";
 type AuthMode = "login" | "register";
@@ -18,6 +17,51 @@ const carrierColors: Record<string, string> = {
 const statusLabels: Record<string, string> = {
   pending: "Pendiente", paid: "Pagada", failed: "Fallida"
 };
+
+const CHECKOUT_ATTEMPT_KEY = "recargas_checkout_attempt";
+
+async function getCheckoutFingerprint(
+  userId: number,
+  packageId: number,
+  phone: string
+): Promise<string> {
+  const input = new TextEncoder().encode(`${userId}:${packageId}:${phone}`);
+  const digest = await crypto.subtle.digest("SHA-256", input);
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0")
+  ).join("");
+}
+
+function getStoredCheckoutAttempt(
+  fingerprint: string
+): { fingerprint: string; requestId: string } | null {
+  const stored = sessionStorage.getItem(CHECKOUT_ATTEMPT_KEY);
+  if (!stored) return null;
+
+  try {
+    const attempt: unknown = JSON.parse(stored);
+    if (
+      typeof attempt === "object" &&
+      attempt !== null &&
+      "fingerprint" in attempt &&
+      attempt.fingerprint === fingerprint &&
+      "requestId" in attempt &&
+      typeof attempt.requestId === "string" &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(attempt.requestId)
+    ) {
+      return {
+        fingerprint,
+        requestId: attempt.requestId
+      };
+    }
+  } catch {
+    sessionStorage.removeItem(CHECKOUT_ATTEMPT_KEY);
+    return null;
+  }
+
+  sessionStorage.removeItem(CHECKOUT_ATTEMPT_KEY);
+  return null;
+}
 
 function App() {
   const [token, setToken] = useState(() => sessionStorage.getItem("recargas_token") ?? "");
@@ -44,6 +88,7 @@ function App() {
   const [showPassword, setShowPassword] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState("");
+  const [sessionError, setSessionError] = useState("");
   const [checkoutLoading, setCheckoutLoading] = useState(false);
   const [checkoutError, setCheckoutError] = useState("");
   const checkoutAttempt = useRef<{ fingerprint: string; requestId: string } | null>(null);
@@ -54,10 +99,13 @@ function App() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState("");
   const [historyRefresh, setHistoryRefresh] = useState(0);
+  const [paymentPollCount, setPaymentPollCount] = useState(0);
+  const paymentRechargeId = new URLSearchParams(window.location.search)
+    .get("rechargeId");
 
   useEffect(() => {
     let active = true;
-    getCarriers().then((items) => {
+    api.carriers().then((items) => {
       if (!active) return;
       setCarriers(items);
       setCarrierCode(items[0]?.code ?? "");
@@ -72,11 +120,12 @@ function App() {
   useEffect(() => {
     if (!carrierCode) return;
     let active = true;
+    setCatalogError("");
     api.types(carrierCode).then((items) => {
       if (!active) return;
       setTypes(items);
       setTypeCode(items[0]?.code ?? "");
-      setCatalogError("");
+      if (items.length === 0) setPackagesLoading(false);
     }).catch((error: Error) => {
       if (active) setCatalogError(error.message);
     });
@@ -84,8 +133,12 @@ function App() {
   }, [carrierCode]);
 
   useEffect(() => {
-    if (!carrierCode || !typeCode) return;
+    if (!carrierCode || !typeCode) {
+      setPackagesLoading(false);
+      return;
+    }
     let active = true;
+    setPackagesLoading(true);
     api.packages(carrierCode, typeCode).then((items) => {
       if (active) setPackages(items);
     }).catch((error: Error) => {
@@ -100,12 +153,23 @@ function App() {
     if (!token) return;
     let active = true;
     api.me(token).then(({ user: currentUser }) => {
-      if (active) setUser(currentUser);
-    }).catch(() => {
+      if (active) {
+        setUser(currentUser);
+        setSessionError("");
+      }
+    }).catch((error: unknown) => {
       if (!active) return;
-      sessionStorage.removeItem("recargas_token");
-      setToken("");
-      setUser(null);
+      if (error instanceof ApiError && error.status === 401) {
+        sessionStorage.removeItem("recargas_token");
+        setToken("");
+        setUser(null);
+        return;
+      }
+      setSessionError(
+        error instanceof Error
+          ? error.message
+          : "No se pudo validar la sesión"
+      );
     });
     return () => { active = false; };
   }, [token]);
@@ -113,19 +177,52 @@ function App() {
   useEffect(() => {
     if (page !== "history" || !token) return;
     let active = true;
+    let pollTimer: number | undefined;
     api.history(token, historyPage, HISTORY_PAGE_SIZE).then(({ recharges, total }) => {
       if (active) {
         setHistory(recharges);
         setHistoryTotal(total);
         setHistoryError("");
+
+        const paymentRecharge = recharges.find(
+          (item) => item.id === paymentRechargeId
+        );
+        if (
+          paymentReturn === "success" &&
+          paymentRechargeId &&
+          paymentRecharge?.status === "pending" &&
+          paymentPollCount < 15
+        ) {
+          pollTimer = window.setTimeout(() => {
+            setPaymentPollCount((count) => count + 1);
+            setHistoryRefresh((refresh) => refresh + 1);
+          }, 2000);
+        } else if (
+          paymentRecharge &&
+          paymentRecharge.status !== "pending"
+        ) {
+          checkoutAttempt.current = null;
+          sessionStorage.removeItem(CHECKOUT_ATTEMPT_KEY);
+        }
       }
     }).catch((error: Error) => {
       if (active) setHistoryError(error.message);
     }).finally(() => {
       if (active) setHistoryLoading(false);
     });
-    return () => { active = false; };
-  }, [page, token, historyPage, historyRefresh]);
+    return () => {
+      active = false;
+      if (pollTimer !== undefined) window.clearTimeout(pollTimer);
+    };
+  }, [
+    page,
+    token,
+    historyPage,
+    historyRefresh,
+    paymentPollCount,
+    paymentRechargeId,
+    paymentReturn
+  ]);
 
   function chooseCarrier(code: string) {
     setCarrierCode(code);
@@ -134,6 +231,7 @@ function App() {
     setPackages([]);
     setSelectedPackage(null);
     setCheckoutError("");
+    setPackagesLoading(true);
   }
 
   function chooseType(code: string) {
@@ -170,19 +268,31 @@ function App() {
     setHistoryTotal(0);
     setHistoryPage(1);
     setPage("catalog");
+    sessionStorage.removeItem(CHECKOUT_ATTEMPT_KEY);
   }
 
   async function pay() {
-    if (!selectedPackage || !token || !/^\d{10}$/.test(phone)) return;
+    if (!selectedPackage || !token || !user || !/^\d{10}$/.test(phone)) return;
     setCheckoutError("");
     setCheckoutLoading(true);
     try {
-      const fingerprint = `${token}:${selectedPackage.id}:${phone}`;
+      const fingerprint = await getCheckoutFingerprint(
+        user.id,
+        selectedPackage.id,
+        phone
+      );
       if (checkoutAttempt.current?.fingerprint !== fingerprint) {
+        checkoutAttempt.current = getStoredCheckoutAttempt(fingerprint);
+      }
+      if (!checkoutAttempt.current) {
         checkoutAttempt.current = {
           fingerprint,
           requestId: crypto.randomUUID()
         };
+        sessionStorage.setItem(
+          CHECKOUT_ATTEMPT_KEY,
+          JSON.stringify(checkoutAttempt.current)
+        );
       }
       const session = await api.checkout(
         token,
@@ -194,6 +304,14 @@ function App() {
       window.location.assign(session.url);
     } catch (error) {
       setCheckoutError(error instanceof Error ? error.message : "Error al crear el pago");
+      if (
+        error instanceof ApiError &&
+        error.status === 409 &&
+        error.message.includes("La sesión de pago ya no está disponible")
+      ) {
+        checkoutAttempt.current = null;
+        sessionStorage.removeItem(CHECKOUT_ATTEMPT_KEY);
+      }
       setCheckoutLoading(false);
     }
   }
@@ -224,7 +342,7 @@ function App() {
       <main className="r-main">
         {paymentReturn === "success" && (
           <div className="r-notice" role="status">
-            <strong>Regresaste de Stripe.</strong> Verifica el estado final en Historial. La confirmación depende del webhook, no de esta página.
+            <strong>Regresaste de Stripe.</strong> Consultando el estado confirmado por el webhook.
           </div>
         )}
         {paymentReturn === "cancelled" && (
@@ -265,6 +383,19 @@ function App() {
                   </div>
                 </article>
               ))}</div>}
+            {paymentReturn === "success" &&
+              paymentRechargeId &&
+              history.some(
+                (item) =>
+                  item.id === paymentRechargeId && item.status === "pending"
+              ) && (
+                <p className="r-muted" role="status">
+                  Stripe recibió el pago; esperamos la confirmación del webhook.
+                  {paymentPollCount >= 15
+                    ? " Puedes actualizar el historial más tarde."
+                    : " El estado se actualizará automáticamente."}
+                </p>
+              )}
             {token && historyTotal > HISTORY_PAGE_SIZE && !historyError && (
               <div className="r-panel-heading">
                 <button
@@ -358,7 +489,7 @@ function App() {
                   onChange={(e) => setPhone(e.target.value.replace(/\D/g, ""))} />
                 <div className="r-total"><span>Total</span><strong>{currency(selectedPackage?.price_cents ?? 0)}</strong></div>
                 {token ? (
-                  <button className="r-primary-button" disabled={!selectedPackage || !/^\d{10}$/.test(phone) || checkoutLoading}
+                  <button className="r-primary-button" disabled={!user || !selectedPackage || !/^\d{10}$/.test(phone) || checkoutLoading}
                     onClick={pay}>{checkoutLoading ? "Preparando pago..." : "Pagar con Stripe →"}</button>
                 ) : <p className="r-muted r-signin-hint">Inicia sesión para poder pagar.</p>}
                 {checkoutError && <p className="r-error" role="alert">{checkoutError}</p>}
@@ -408,7 +539,16 @@ function App() {
                     </button>
                   </form>
                 </div>
-              ) : <div className="r-signed-in">✓ Sesión iniciada {user ? `como ${user.email}` : "correctamente"}</div>}
+              ) : (
+                <div className="r-signed-in">
+                  {user
+                    ? `✓ Sesión iniciada como ${user.email}`
+                    : "Validando sesión..."}
+                  {sessionError && (
+                    <p className="r-error" role="alert">{sessionError}</p>
+                  )}
+                </div>
+              )}
             </aside>
           </div>
         )}

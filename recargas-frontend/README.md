@@ -1,51 +1,61 @@
 # Recargas — React + TypeScript + PostgreSQL + Stripe
 
-Aplicación **de demostración** para seleccionar operadoras, consultar paquetes, registrar usuarios y simular pagos de recargas mediante Stripe Checkout en modo de prueba. **No acredita saldo telefónico real**; el estado `paid` significa que Stripe confirmó el pago de prueba.
+Aplicación de demostración para consultar compañías y paquetes, registrar usuarios y simular pagos con Stripe Checkout en modo de prueba. **No aplica saldo telefónico real**: el estado `paid` solo significa que Stripe confirmó el pago de prueba.
 
 ## Tecnologías
 
 - Frontend: React + TypeScript + Vite
 - Backend: Node.js + Express + TypeScript
-- Base de datos: PostgreSQL, base `recargas`
-- Autenticación (implementación local): JWT y bcryptjs
-- Pagos: Stripe Checkout + webhook firmado
-- Pruebas: Postman y Stripe CLI
+- Base de datos: PostgreSQL
+- Autenticación: JWT y bcryptjs
+- Pagos: Stripe Checkout y webhook firmado
+- Pruebas automatizadas: validación de entradas del backend con `node:test`
 
 ## Requisitos
 
-- Node.js compatible con las versiones de las dependencias del repositorio (se probó durante el desarrollo con Node 24).
-- npm y PostgreSQL instalados.
+- Node.js 24 o compatible con las dependencias del proyecto y npm.
+- PostgreSQL y `psql`.
 - Una cuenta de Stripe configurada en modo de prueba.
-- Las tablas `users`, `recharges`, `carriers`, `recharge_types` y `recharge_packages` creadas en PostgreSQL (utilizar los scripts SQL o migraciones propias del proyecto).
+- Stripe CLI para probar webhooks localmente.
 
 ## Estructura
 
 ```text
 Practica/
-├── src/                  # React
-├── index.html
-├── .env                  # Variables públicas de Vite (no subir)
 ├── backend/
-│   ├── src/              # API Express
-│   ├── sql/              # SQL de catálogo si existe
+│   ├── src/              # API Express y pruebas
+│   ├── sql/
+│   │   ├── migrations/   # Esquema versionado
+│   │   └── seed/         # Catálogo ficticio de demostración
 │   ├── .env              # Credenciales privadas (no subir)
 │   └── package.json
-└── package.json
+└── recargas-frontend/
+    ├── src/              # Aplicación React
+    ├── .env              # Variables públicas de Vite (no subir)
+    └── package.json
 ```
 
 ## Configurar PostgreSQL
 
-Crea o utiliza la base existente `recargas`. Aplica los scripts SQL del esquema y del catálogo en la misma base, respetando el orden de las relaciones. Si ya hay datos, evita reinicializar tablas o aplicar scripts destructivos sin respaldo.
+Crea una base nueva llamada `recargas` y, desde la raíz del repositorio, aplica el esquema y los datos de demostración:
+
+```bash
+createdb -U postgres recargas
+psql -h localhost -U postgres -d recargas -f backend/sql/migrations/001_initial_schema.sql
+psql -h localhost -U postgres -d recargas -f backend/sql/seed/001_demo_catalog.sql
+```
+
+La migración inicial está destinada a una base nueva. Si ya tienes tablas o datos, haz un respaldo y compara los esquemas antes de aplicar cualquier migración; esta versión no transforma automáticamente instalaciones existentes. El catálogo de ejemplo incluye precios y beneficios ficticios para probar la aplicación, no representa ofertas reales.
 
 ## Variables de entorno
 
-Crea `Practica/.env` (frontend):
+Crea `recargas-frontend/.env`:
 
 ```dotenv
 VITE_API_URL=http://localhost:3001/api
 ```
 
-Crea `Practica/backend/.env` (backend):
+Crea `backend/.env`:
 
 ```dotenv
 PORT=3001
@@ -60,9 +70,9 @@ STRIPE_SECRET_KEY=sk_test_REEMPLAZAR
 STRIPE_WEBHOOK_SECRET=whsec_REEMPLAZAR
 ```
 
-No subas `.env`, credenciales, tokens ni claves secretas al repositorio. Sólo las variables `VITE_` deben usarse en el frontend, porque se exponen al navegador.
+No subas `.env`, credenciales, tokens ni claves secretas al repositorio. Las variables `VITE_` se exponen en el navegador; nunca guardes ahí secretos de backend. `STRIPE_SECRET_KEY` debe ser de prueba y `STRIPE_WEBHOOK_SECRET` es el secreto que proporciona Stripe CLI.
 
-## Instalación y ejecución
+## Instalar y ejecutar
 
 **Terminal 1 — Backend**
 
@@ -74,14 +84,15 @@ npm run dev
 
 Servidor esperado: `http://localhost:3001`.
 
-**Terminal 2 — Frontend** (desde la raíz de `Practica`)
+**Terminal 2 — Frontend**
 
 ```bash
+cd recargas-frontend
 npm install
 npm run dev
 ```
 
-Frontend esperado: `http://localhost:5173` (confirma el puerto mostrado por Vite y actualiza `FRONTEND_URL` si cambia).
+Frontend esperado: `http://localhost:5173`. Si Vite elige otro puerto, ajusta `FRONTEND_URL` y reinicia el backend.
 
 **Terminal 3 — Webhooks Stripe CLI**
 
@@ -90,49 +101,66 @@ stripe login
 stripe listen --events checkout.session.completed,checkout.session.async_payment_succeeded,checkout.session.async_payment_failed,checkout.session.expired --forward-to http://localhost:3001/api/payments/webhook
 ```
 
-Copia el secreto `whsec_...` que te muestre Stripe CLI a `backend/.env`, reinicia el backend y mantén la CLI activa durante las pruebas. La clave `whsec_` no es la clave `sk_test_`.
+Copia el valor `whsec_...` mostrado por Stripe CLI a `backend/.env`, reinicia el backend y mantén la CLI activa durante las pruebas.
+
+## Validaciones
+
+Ejecuta desde la raíz:
+
+```bash
+npm --prefix backend test
+npm --prefix backend run build
+npm --prefix recargas-frontend run lint
+npm --prefix recargas-frontend run build
+```
+
+Las pruebas automatizadas cubren validación de Checkout, límites de paginación e identificadores UUID. El flujo con Stripe requiere las pruebas manuales descritas abajo.
 
 ## Endpoints
 
-| Método | Ruta | Requiere autenticación |
+| Método | Ruta | Autenticación |
 |---|---|---|
-| GET | `/api/health` | No |
+| GET | `/api/health` | No; disponibilidad de la API |
+| GET | `/api/health/ready` | No; comprueba PostgreSQL |
 | GET | `/api/carriers` | No |
 | GET | `/api/carriers/:code/types` | No |
 | GET | `/api/packages?carrier=telcel&type=paquetes` | No |
 | POST | `/api/auth/register` | No |
 | POST | `/api/auth/login` | No |
-| GET | `/api/auth/me` | JWT Bearer (versión local) |
-| POST | `/api/payments/checkout` | JWT Bearer (versión local) |
-| POST | `/api/payments/webhook` | Firma de Stripe, no JWT |
-| GET | `/api/recharges?page=1&limit=10` | JWT Bearer (si se activó paginación) |
+| GET | `/api/auth/me` | JWT Bearer |
+| POST | `/api/payments/checkout` | JWT Bearer |
+| POST | `/api/payments/webhook` | Firma de Stripe |
+| GET | `/api/recharges?page=1&limit=10` | JWT Bearer |
 | GET | `/api/recharges/:id` | JWT Bearer |
 
-El historial acepta `page` (predeterminado `1`) y `limit` (predeterminado `50`, máximo `50`). La respuesta incluye `total` para todas las recargas del usuario, además de la página y el límite aplicados.
+El historial acepta `page` (predeterminado `1`) y `limit` (predeterminado `50`, máximo `50`). La respuesta incluye `total`, `page`, `limit` y `recharges`. El JWT expira a los **10 minutos**; inicia sesión de nuevo para obtener uno nuevo.
 
-Ejemplo de body para crear Checkout (usa un UUID nuevo para cada intento; reutilízalo si necesitas repetir la misma solicitud):
+### Crear un Checkout
+
+Usa un UUID nuevo al iniciar una operación; reutiliza el mismo UUID al reintentar esa misma solicitud:
 
 ```json
-{"requestId":"7f3da5fc-a433-4f6d-9f9c-4f9de57db2f7","packageId":1,"phone":"3121234567"}
+{
+  "requestId": "7f3da5fc-a433-4f6d-9f9c-4f9de57db2f7",
+  "packageId": 1,
+  "phone": "3121234567"
+}
 ```
 
-El frontend genera y reutiliza el UUID mientras se reintenta el mismo intento de pago. El backend lo usa como ID de recarga y clave de idempotencia de Stripe, evitando crear otra sesión para la misma solicitud. El backend obtiene el precio de PostgreSQL y devuelve la URL de Checkout. **No confíes en un importe enviado por el frontend**. El webhook firmado es quien confirma el pago y actualiza la operación. El estado `paid` no significa que una compañía telefónica haya enviado saldo.
+El frontend conserva temporalmente el identificador de intento en `sessionStorage`, sin almacenar el teléfono, para reutilizarlo al reintentar o volver de Stripe en la misma pestaña. Si la sesión ya expiró, el backend responde `409`; el siguiente intento generará una recarga nueva. El backend determina el importe desde PostgreSQL, no desde el cliente. Solo el webhook firmado confirma el pago. Un `paid` de Stripe no indica que se haya enviado saldo a una línea.
 
 ## Pruebas manuales
 
-1. GET `/api/health` responde 200.
-2. GET `/api/carriers` devuelve compañías activas.
-3. Registra un usuario y haz login; usa el JWT en Postman.
-4. Crea un Checkout con un paquete existente: debe registrarse `pending`.
-5. Completa el pago en Stripe **modo prueba** con tarjeta de test oficial.
-6. Comprueba que el webhook responda 200 y que PostgreSQL refleje `paid`.
-7. Repite el mismo POST de Checkout con el mismo `requestId`: debe devolverte la misma sesión, sin crear otra recarga.
-8. GET `/api/recharges?page=1&limit=10` devuelve sólo las recargas del usuario autenticado e informa el total; comprueba `page=2` si hay más de 10.
-9. Comprueba que no se dupliquen confirmaciones de webhook, así como fallos de Stripe e intentos de login excesivos.
+1. Comprueba que `GET /api/health` responda `200` y `GET /api/health/ready` indique si PostgreSQL está disponible.
+2. Consulta `GET /api/carriers` y confirma que devuelve compañías activas.
+3. Registra un usuario e inicia sesión; usa el JWT como Bearer en Postman.
+4. Crea un Checkout con un paquete existente y comprueba que la recarga quede `pending`.
+5. Completa el pago con una tarjeta de prueba oficial de Stripe.
+6. Comprueba que el webhook responda `200` y que PostgreSQL actualice el estado.
+7. Repite el POST con el mismo `requestId`: debe reutilizar la recarga/sesión, no crear otra.
+8. Prueba el historial paginado y verifica que solo muestre recargas del usuario autenticado.
+9. Comprueba que se toleren webhooks duplicados y se manejen los fallos de pago.
 
-## Consideraciones de seguridad y despliegue
+## Seguridad y despliegue
 
-- Implementación orientada a aprendizaje y pruebas; **no está lista para producción** sin revisión de seguridad, límites de intentos persistentes, gestión segura de sesiones, defensa CSRF con cookies, observabilidad, despliegue HTTPS y recuperación de pagos incompletos.
-- No modificar a `paid` una recarga sin verificación con Stripe.
-- Proteger datos personales como números telefónicos y evitar registrar credenciales en logs.
-- Las ofertas del catálogo de demostración son ficticias: comprobar precios y beneficios reales con el proveedor antes de un lanzamiento comercial.
+Esta aplicación es para aprendizaje y pruebas; **no está lista para producción**. Antes de desplegarla hacen falta revisión de seguridad, limitación de intentos compartida/persistente, sesiones seguras, controles CSRF si se usan cookies, observabilidad, HTTPS, política CORS de producción y conciliación de pagos incompletos. Protege los números telefónicos y nunca registres credenciales. Verifica cualquier precio o beneficio real con el proveedor antes de ofrecer recargas comerciales.

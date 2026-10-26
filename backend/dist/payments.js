@@ -1,14 +1,9 @@
 import { Router } from "express";
-import { z } from "zod";
 import { pool } from "./db.js";
 import { stripe } from "./stripe.js";
 import { requireAuth } from "./auth.js";
+import { checkoutSchema } from "./validation.js";
 export const paymentsRouter = Router();
-const checkoutSchema = z.object({
-    requestId: z.uuid(),
-    packageId: z.number().int().positive(),
-    phone: z.string().regex(/^\d{10}$/)
-});
 paymentsRouter.post("/checkout", requireAuth, async (req, res) => {
     const validation = checkoutSchema.safeParse(req.body);
     if (!validation.success) {
@@ -111,8 +106,8 @@ paymentsRouter.post("/checkout", requireAuth, async (req, res) => {
                     quantity: 1
                 },
             ],
-            success_url: `${process.env.FRONTEND_URL}/?payment=success`,
-            cancel_url: `${process.env.FRONTEND_URL}/?payment=cancelled`,
+            success_url: `${process.env.FRONTEND_URL}/?payment=success&rechargeId=${encodeURIComponent(rechargeId)}`,
+            cancel_url: `${process.env.FRONTEND_URL}/?payment=cancelled&rechargeId=${encodeURIComponent(rechargeId)}`,
             client_reference_id: String(userId),
             metadata: {
                 rechargeId,
@@ -139,9 +134,15 @@ paymentsRouter.post("/checkout", requireAuth, async (req, res) => {
             throw new Error("No se pudo asociar la sesión de Stripe a la recarga");
         }
     }
+    if (session.status === "expired") {
+        res.status(409).json({
+            error: "La sesión de pago ya no está disponible porque expiró. Crea un nuevo intento."
+        });
+        return;
+    }
     if (!session.url) {
         res.status(409).json({
-            error: "La sesión de pago ya no está disponible. Consulta tu historial."
+            error: "La sesión de pago ya se completó o no está disponible. Consulta tu historial."
         });
         return;
     }

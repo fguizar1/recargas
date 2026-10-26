@@ -3,21 +3,9 @@ import { z } from "zod";
 
 import { pool } from "./db.js";
 import { requireAuth } from "./auth.js";
+import { paginationSchema, rechargeIdSchema } from "./validation.js";
 
 export const rechargesRouter = Router();
-
-const positiveIntegerQuery = z
-  .string()
-  .regex(/^[1-9]\d*$/)
-  .transform(Number)
-  .refine(Number.isSafeInteger);
-
-const paginationSchema = z.object({
-  page: positiveIntegerQuery.optional(),
-  limit: positiveIntegerQuery
-    .refine((value) => value <= 50)
-    .optional()
-});
 
 // GET /api/recharges
 rechargesRouter.get(
@@ -91,8 +79,14 @@ rechargesRouter.get(
   "/:id",
   requireAuth,
   async (req, res) => {
-
     const rechargeId = req.params.id;
+    if (!rechargeIdSchema.safeParse(rechargeId).success) {
+      res.status(400).json({
+        error: "Identificador de recarga inválido"
+      });
+      return;
+    }
+
     const userId = res.locals.userId as number;
 
     const result = await pool.query(

@@ -47,6 +47,35 @@ paths:
                 status: ok
                 message: API de recargas funcionando
 
+  /api/health/ready:
+    get:
+      tags: [Health]
+      summary: Comprobar disponibilidad de PostgreSQL
+      operationId: getReadiness
+      responses:
+        '200':
+          description: API y base de datos disponibles
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [ready]
+        '503':
+          description: PostgreSQL no está disponible
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [not_ready]
+
   /api/auth/register:
     post:
       tags: [Authentication]
@@ -93,7 +122,7 @@ paths:
     post:
       tags: [Authentication]
       summary: Iniciar sesión y obtener JWT
-      description: El JWT de esta versión expira en 2 horas.
+      description: El JWT de esta versión expira en 10 minutos.
       operationId: loginUser
       requestBody:
         required: true
@@ -256,6 +285,7 @@ paths:
       description: |
         Requiere un JWT válido. El backend recupera el precio en PostgreSQL,
         crea la recarga `pending` y solicita a Stripe una URL de Checkout.
+        Reutiliza `requestId` al reintentar el mismo intento.
         La respuesta NO confirma que el pago haya sido realizado.
       operationId: createCheckoutSession
       security:
@@ -267,6 +297,7 @@ paths:
             schema:
               $ref: '#/components/schemas/CreateCheckoutRequest'
             example:
+              requestId: 7f3da5fc-a433-4f6d-9f9c-4f9de57db2f7
               packageId: 1
               phone: '3121234567'
       responses:
@@ -282,6 +313,12 @@ paths:
                 sessionId: cs_test_ejemplo
                 url: https://checkout.stripe.com/ejemplo
                 status: pending
+        '200':
+          description: Se reutilizó una recarga y sesión ya existentes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckoutResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -294,6 +331,12 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
               example:
                 error: Paquete no encontrado
+        '409':
+          description: El intento ya no está pendiente o su sesión expiró
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '429':
           $ref: '#/components/responses/TooManyRequests'
         '500':
@@ -353,9 +396,8 @@ paths:
       tags: [Recharges]
       summary: Listar historial propio de recargas
       description: |
-        Se filtra por el usuario autenticado a partir del JWT. Esta versión
-        documenta la variante **paginada** (`page`, `limit`) propuesta para
-        `recharges.ts`; verifica que ya la hayas aplicado.
+        Se filtra por el usuario autenticado a partir del JWT. Acepta páginas
+        de hasta 50 recargas y devuelve `total`, `page`, `limit` y `recharges`.
       operationId: listMyRecharges
       security:
         - bearerAuth: []
@@ -375,7 +417,7 @@ paths:
             type: integer
             minimum: 1
             maximum: 50
-            default: 10
+            default: 50
           example: 10
       responses:
         '200':
@@ -414,6 +456,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/RechargeDetailResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -555,7 +599,7 @@ components:
           example: Inicio de sesión exitoso
         token:
           type: string
-          description: Token JWT con una duración de 2 horas.
+          description: Token JWT con una duración de 10 minutos.
           example: eyJhbGciOiJIUzI1NiIs...TOKEN_DE_EJEMPLO
         user:
           $ref: '#/components/schemas/User'
@@ -597,7 +641,7 @@ components:
 
     RechargePackage:
       type: object
-      required: [id, name, price_cents, validity_days, benefits, type, carrier]
+      required: [id, name, price_cents, validity_days, validity_hours, benefits, type, carrier]
       properties:
         id:
           type: integer
@@ -619,7 +663,7 @@ components:
           type: integer
           nullable: true
           minimum: 1
-          description: Disponible si se añadió esta columna al SELECT de paquetes.
+          description: Duración opcional del paquete en horas.
         benefits:
           type: array
           items:
@@ -637,8 +681,13 @@ components:
     CreateCheckoutRequest:
       type: object
       additionalProperties: false
-      required: [packageId, phone]
+      required: [requestId, packageId, phone]
       properties:
+        requestId:
+          type: string
+          format: uuid
+          description: Identificador idempotente del intento; reutilízalo al reintentar la misma operación.
+          example: 7f3da5fc-a433-4f6d-9f9c-4f9de57db2f7
         packageId:
           type: integer
           minimum: 1
@@ -749,7 +798,7 @@ components:
 
     PaginatedRecharges:
       type: object
-      required: [page, limit, total, totalPages, recharges]
+      required: [page, limit, total, recharges]
       properties:
         page:
           type: integer
@@ -760,9 +809,6 @@ components:
         total:
           type: integer
           example: 23
-        totalPages:
-          type: integer
-          example: 3
         recharges:
           type: array
           items:

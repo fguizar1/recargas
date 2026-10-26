@@ -36,6 +36,7 @@ export const stripeWebhookHandler: RequestHandler =
         webhookSecret
       );
     } catch {
+      console.warn("Se rechazó un webhook con firma no válida");
       res.status(400).json({
         error: "Firma del webhook inválida"
       });

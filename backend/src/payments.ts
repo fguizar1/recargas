@@ -1,19 +1,13 @@
 import { Router } from "express";
-import { z } from "zod";
 
 import { pool } from "./db.js";
 import { stripe } from "./stripe.js";
 import { requireAuth } from "./auth.js";
+import { checkoutSchema } from "./validation.js";
 
 import Stripe from "stripe";
 
 export const paymentsRouter = Router();
-
-const checkoutSchema = z.object({
-  requestId: z.uuid(),
-  packageId: z.number().int().positive(),
-  phone: z.string().regex(/^\d{10}$/)
-});
 
 paymentsRouter.post(
   "/checkout",
@@ -152,10 +146,10 @@ paymentsRouter.post(
             ],
 
             success_url:
-              `${process.env.FRONTEND_URL}/?payment=success`,
+              `${process.env.FRONTEND_URL}/?payment=success&rechargeId=${encodeURIComponent(rechargeId)}`,
 
             cancel_url:
-              `${process.env.FRONTEND_URL}/?payment=cancelled`,
+              `${process.env.FRONTEND_URL}/?payment=cancelled&rechargeId=${encodeURIComponent(rechargeId)}`,
 
             client_reference_id: String(userId),
 
@@ -194,9 +188,16 @@ paymentsRouter.post(
       }
     }
 
+    if (session.status === "expired") {
+      res.status(409).json({
+        error: "La sesión de pago ya no está disponible porque expiró. Crea un nuevo intento."
+      });
+      return;
+    }
+
     if (!session.url) {
       res.status(409).json({
-        error: "La sesión de pago ya no está disponible. Consulta tu historial."
+        error: "La sesión de pago ya se completó o no está disponible. Consulta tu historial."
       });
       return;
     }
